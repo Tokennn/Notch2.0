@@ -2,7 +2,7 @@
 //  ContentView.swift
 //  Notch2.0
 //
-//  Created by Solo on 20/03/2026.
+//  Created by Solo on 20/03/2026. 
 //
 
 import SwiftUI

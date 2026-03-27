@@ -39,6 +39,12 @@ actor ArtworkResolver {
     func fetchArtworkData(for snapshot: NowPlayingSnapshot) async -> Data? {
         let source = snapshot.sourceApp ?? ""
 
+        if let artworkURLString = snapshot.artworkURLString,
+           artworkURLString.isEmpty == false,
+           let artwork = await fetchArtworkData(fromDirectURLString: artworkURLString, cachePrefix: "snapshot-url") {
+            return artwork
+        }
+
         if source == "com.spotify.client" {
             if let artwork = await fetchStrictSpotifyArtwork(for: snapshot) {
                 return artwork

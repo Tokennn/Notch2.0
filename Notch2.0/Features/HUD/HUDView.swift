@@ -8,6 +8,8 @@ struct HUDView: View {
     let onCollapsedHandleHover: (() -> Void)?
     let onNowPlayingDoubleClick: (() -> Void)?
 
+    @ObservedObject private var audioSpectrum = AudioSpectrumService.shared
+
     @State private var collapseProgress: CGFloat = 0
     @State private var entryScale: CGFloat = 1
     @State private var entryOffsetY: CGFloat = 0
@@ -164,6 +166,15 @@ struct HUDView: View {
                         .lineLimit(1)
                 }
 
+                NowPlayingMiniSpectrumView(
+                    isPlaying: payload.isPlaying ?? false,
+                    seedText: payload.title + "|" + (payload.subtitle ?? ""),
+                    progress: payload.progress,
+                    liveBands: audioSpectrum.bands,
+                    hasLiveAudio: audioSpectrum.hasLiveAudio
+                )
+                .padding(.top, 1)
+
                 GeometryReader { proxy in
                     let progress = CGFloat(min(max(payload.progress ?? 0, 0), 1))
                     let width = max(6, proxy.size.width * progress)
@@ -295,6 +306,114 @@ struct HUDView: View {
                 tapOffsetY = 0
             }
         }
+    }
+}
+
+private struct NowPlayingMiniSpectrumView: View {
+    let isPlaying: Bool
+    let progress: Float?
+    let liveBands: [Float]
+    let hasLiveAudio: Bool
+    private let seedValue: Double
+
+    private let barCount = 10
+    private let barWidth: CGFloat = 1.6
+    private let barSpacing: CGFloat = 1.35
+    private let visualizerWidth: CGFloat = 29
+    private let minBarHeight: CGFloat = 2
+    private let maxBarHeight: CGFloat = 11
+
+    init(
+        isPlaying: Bool,
+        seedText: String,
+        progress: Float?,
+        liveBands: [Float],
+        hasLiveAudio: Bool
+    ) {
+        self.isPlaying = isPlaying
+        self.progress = progress
+        self.liveBands = liveBands
+        self.hasLiveAudio = hasLiveAudio
+        self.seedValue = Self.seed(from: seedText)
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1.0 / 24.0)) { context in
+            let shouldUseLiveBands = isPlaying && hasLiveAudio && ((liveBands.max() ?? 0) > 0.001)
+            HStack(alignment: .bottom, spacing: barSpacing) {
+                ForEach(0 ..< barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(barColor(for: index))
+                        .frame(
+                            width: barWidth,
+                            height: barHeight(
+                                for: index,
+                                time: context.date.timeIntervalSinceReferenceDate,
+                                shouldUseLiveBands: shouldUseLiveBands
+                            )
+                        )
+                }
+            }
+            .frame(width: visualizerWidth, height: maxBarHeight, alignment: .leading)
+            .opacity(isPlaying ? 1 : 0.58)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func barHeight(
+        for index: Int,
+        time: TimeInterval,
+        shouldUseLiveBands: Bool
+    ) -> CGFloat {
+        let barSpan = maxBarHeight - minBarHeight
+        if shouldUseLiveBands, index < liveBands.count {
+            let liveValue = CGFloat(min(max(liveBands[index], 0), 1))
+            return minBarHeight + (liveValue * barSpan)
+        }
+
+        let x = Double(index) / Double(max(barCount - 1, 1))
+        let level = Double(min(max(progress ?? 0.65, 0), 1))
+
+        guard isPlaying else {
+            let idleLow = abs(sin((seedValue * 1.4) + (Double(index) * 0.62)))
+            let idleHigh = abs(sin((seedValue * 2.2) + (Double(index) * 1.15)))
+            let idleMix = min(1, (idleLow * 0.62) + (pow(idleHigh, 1.3) * 0.38))
+            return minBarHeight + (CGFloat(idleMix) * barSpan * 0.32)
+        }
+
+        let t = time + seedValue
+        let bassWave = abs(sin((t * 2.15) + (x * 2.8)))
+        let midWave = abs(sin((t * 5.7) + (x * 9.1) + (seedValue * 0.33)))
+        let highWave = pow(abs(sin((t * 11.9) + (x * 18.6) + (seedValue * 0.71))), 1.4)
+
+        let bassWeight = max(0, 1 - (x * 1.55))
+        let trebleWeight = max(0, (x - 0.34) / 0.66)
+        let midWeight = max(0.12, 1 - abs((x - 0.5) * 1.88))
+
+        let energy =
+            (0.44 * bassWave * bassWeight) +
+            (0.30 * midWave * midWeight) +
+            (0.48 * highWave * trebleWeight)
+
+        let loudness = 0.60 + (level * 0.4)
+        let normalized = min(max((0.14 + energy) * loudness, 0), 1)
+        return minBarHeight + (CGFloat(normalized) * barSpan)
+    }
+
+    private func barColor(for index: Int) -> Color {
+        let x = Double(index) / Double(max(barCount - 1, 1))
+        let hue = 0.35 + (x * 0.09)
+        return Color(hue: hue, saturation: 0.58, brightness: 0.98)
+    }
+
+    private static func seed(from text: String) -> Double {
+        var hash: UInt64 = 1469598103934665603
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+
+        return Double(hash % 10_000) / 1_000
     }
 }
 

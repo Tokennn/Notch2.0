@@ -8,7 +8,7 @@ struct Notch2_0App: App {
     init() {
         UserDefaults.standard.register(defaults: [
             "EnableWebPlayerDetection": true,
-            "EnableSystemNowPlayingCenter": false
+            "EnableSystemNowPlayingCenter": true
         ])
     }
 

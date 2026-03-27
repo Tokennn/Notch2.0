@@ -22,7 +22,12 @@ final class NowPlayingService {
         return true
     }
     private var systemNowPlayingCenterEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "EnableSystemNowPlayingCenter")
+        let defaults = UserDefaults.standard
+        if let storedValue = defaults.object(forKey: "EnableSystemNowPlayingCenter") as? Bool {
+            return storedValue
+        }
+
+        return true
     }
 
     func start(onUpdate: @escaping (NowPlayingSnapshot?) -> Void) {
@@ -83,8 +88,8 @@ final class NowPlayingService {
     }
 
     private func fetchFromMediaRemoteIfEnabled() -> NowPlayingSnapshot? {
-        // Disabled: this path is the source of repeated kMRMediaRemote errors
-        // on some machines when no system now-playing client is resolved.
+        // Disabled: this path can trigger repeated kMRMediaRemote "Operation not permitted"
+        // errors on some systems and creates noisy logs.
         return nil
     }
 
@@ -433,45 +438,39 @@ final class NowPlayingService {
 }
 
 private final class BrowserNowPlayingBrowserProbe {
-    private struct ProbePayload: Decodable {
-        let title: String
-        let url: String
-        let currentTime: Double?
-        let duration: Double?
-    }
-
     private struct Candidate {
         let url: String
         let title: String
-        let currentTime: Double?
-        let duration: Double?
+    }
+
+    private struct OEmbedResponse: Decodable {
+        let title: String?
+        let author_name: String?
+        let thumbnail_url: String?
+    }
+
+    private struct EnrichedMetadata {
+        let title: String
+        let artist: String
+        let artworkURLString: String?
     }
 
     private let supportedBrowsers = [
         "com.apple.Safari",
-        "com.google.Chrome"
+        "com.google.Chrome",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "company.thebrowser.Browser"
     ]
     private var probeCooldownUntilByBundle: [String: Date] = [:]
+    private var oEmbedCacheByURL: [String: EnrichedMetadata] = [:]
+    private var oEmbedCooldownUntilByURL: [String: Date] = [:]
+    private var automationPromptAttemptedBundles: Set<String> = []
     private let genericScriptErrorCooldown: TimeInterval = 20
     private let fsFindFolderErrorCooldown: TimeInterval = 60 * 60 * 8
-
-    private let probeJavaScript = #"""
-(() => {
-  const media = Array.from(document.querySelectorAll('video, audio'))
-    .find((element) => {
-      const src = element.currentSrc || element.src || "";
-      const hasTimeline = Number.isFinite(element.duration) && element.duration > 0;
-      return !element.paused && !element.ended && (src.length > 0 || hasTimeline);
-    });
-  if (!media) return "";
-  return JSON.stringify({
-    title: document.title || "",
-    url: location.href || "",
-    currentTime: Number.isFinite(media.currentTime) ? media.currentTime : 0,
-    duration: Number.isFinite(media.duration) ? media.duration : 0
-  });
-})()
-"""#
+    private let connectionInvalidCooldown: TimeInterval = 2
+    private let authorizationDeniedCooldown: TimeInterval = 8
+    private let oEmbedFailureCooldown: TimeInterval = 90
 
     func fetchNowPlaying() -> NowPlayingSnapshot? {
         for bundleID in supportedBrowsers {
@@ -479,59 +478,30 @@ private final class BrowserNowPlayingBrowserProbe {
             if let cooldownUntil = probeCooldownUntilByBundle[bundleID], cooldownUntil > Date() {
                 continue
             }
-            guard let candidate = probeBrowser(bundleID: bundleID) else { continue }
+            let candidate = probeBrowserAudibleTabs(bundleID: bundleID)
+                ?? probeBrowserActiveMediaTabs(bundleID: bundleID)
+            guard let candidate else { continue }
 
-            let cleanedTitle = cleanedTitle(candidate.title, url: candidate.url)
-            let artist = siteName(from: candidate.url)
+            let enriched = enrichedMetadata(for: candidate.url)
+            let title = normalizedText(enriched?.title).isEmpty
+                ? cleanedTitle(candidate.title, url: candidate.url)
+                : normalizedText(enriched?.title)
+            let artist = normalizedText(enriched?.artist).isEmpty
+                ? siteName(from: candidate.url)
+                : normalizedText(enriched?.artist)
+            let artworkURL = normalizedText(enriched?.artworkURLString)
+            NSLog("Notch2.0 browser candidate %@ %@ %@", bundleID, title, candidate.url)
 
             return NowPlayingSnapshot(
-                title: cleanedTitle.isEmpty ? "Lecture web" : cleanedTitle,
+                title: title.isEmpty ? "Lecture web" : title,
                 artist: artist,
                 sourceApp: bundleID,
                 trackIdentifier: candidate.url,
-                artworkURLString: nil,
+                artworkURLString: artworkURL.isEmpty ? nil : artworkURL,
                 isPlaying: true,
-                elapsedTime: candidate.currentTime,
-                duration: candidate.duration,
+                elapsedTime: nil,
+                duration: nil,
                 artworkData: nil
-            )
-        }
-
-        return nil
-    }
-
-    private func probeBrowser(bundleID: String) -> Candidate? {
-        if let audibleCandidate = probeBrowserAudibleTabs(bundleID: bundleID) {
-            return audibleCandidate
-        }
-
-        let scriptSource: String
-        switch bundleID {
-        case "com.apple.Safari":
-            scriptSource = safariScript()
-        case "com.google.Chrome":
-            scriptSource = chromeScript()
-        default:
-            return nil
-        }
-
-        guard let raw = runAppleScript(scriptSource, bundleID: bundleID), raw.isEmpty == false else { return nil }
-
-        for line in raw.components(separatedBy: .newlines) {
-            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmedLine.isEmpty == false else { continue }
-            guard let data = trimmedLine.data(using: .utf8) else { continue }
-            guard let payload = try? JSONDecoder().decode(ProbePayload.self, from: data) else { continue }
-
-            let normalizedURL = payload.url.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard normalizedURL.isEmpty == false else { continue }
-            guard isSupportedMediaURL(normalizedURL) else { continue }
-
-            return Candidate(
-                url: normalizedURL,
-                title: payload.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                currentTime: payload.currentTime,
-                duration: payload.duration
             )
         }
 
@@ -543,8 +513,23 @@ private final class BrowserNowPlayingBrowserProbe {
         switch bundleID {
         case "com.apple.Safari":
             scriptSource = safariAudibleTabsScript()
-        case "com.google.Chrome":
-            scriptSource = chromeAudibleTabsScript()
+        case "com.google.Chrome", "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser.Browser":
+            scriptSource = chromiumAudibleTabsScript(bundleID: bundleID)
+        default:
+            return nil
+        }
+
+        guard let raw = runAppleScript(scriptSource, bundleID: bundleID), raw.isEmpty == false else { return nil }
+        return firstAudibleCandidate(from: raw)
+    }
+
+    private func probeBrowserActiveMediaTabs(bundleID: String) -> Candidate? {
+        let scriptSource: String
+        switch bundleID {
+        case "com.apple.Safari":
+            scriptSource = safariActiveTabsScript()
+        case "com.google.Chrome", "com.brave.Browser", "com.microsoft.edgemac", "company.thebrowser.Browser":
+            scriptSource = chromiumActiveTabsScript(bundleID: bundleID)
         default:
             return nil
         }
@@ -557,68 +542,30 @@ private final class BrowserNowPlayingBrowserProbe {
 
             let parts = trimmedLine.components(separatedBy: "|||")
             guard parts.count >= 2 else { continue }
-
-            let title = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            let url = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = normalizedText(parts[0])
+            let url = normalizedText(parts[1])
             guard isSupportedMediaURL(url) else { continue }
-
-            return Candidate(
-                url: url,
-                title: title,
-                currentTime: nil,
-                duration: nil
-            )
+            guard isLikelyMediaPage(url: url, title: title) else { continue }
+            return Candidate(url: url, title: title)
         }
 
         return nil
     }
 
-    private func safariScript() -> String {
-        #"""
-tell application id "com.apple.Safari"
-    if (count of windows) is 0 then return ""
-    set outputLines to {}
-    set previousDelimiters to AppleScript's text item delimiters
-    repeat with w in windows
-        try
-            set tabRef to current tab of w
-            set probeResult to do JavaScript "PROBE_JS" in tabRef
-            if probeResult is not missing value and probeResult is not "" then
-                set end of outputLines to probeResult
-            end if
-        end try
-    end repeat
-    set AppleScript's text item delimiters to linefeed
-    set joinedOutput to outputLines as string
-    set AppleScript's text item delimiters to previousDelimiters
-    return joinedOutput
-end tell
-"""#
-        .replacingOccurrences(of: "PROBE_JS", with: escapedForAppleScript(probeJavaScript))
-    }
+    private func firstAudibleCandidate(from rawOutput: String) -> Candidate? {
+        for line in rawOutput.components(separatedBy: .newlines) {
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedLine.isEmpty == false else { continue }
+            let parts = trimmedLine.components(separatedBy: "|||")
+            guard parts.count >= 2 else { continue }
 
-    private func chromeScript() -> String {
-        #"""
-tell application id "com.google.Chrome"
-    if (count of windows) is 0 then return ""
-    set outputLines to {}
-    set previousDelimiters to AppleScript's text item delimiters
-    repeat with w in windows
-        try
-            set tabRef to active tab of w
-            set probeResult to execute javascript "PROBE_JS" in tabRef
-            if probeResult is not missing value and probeResult is not "" then
-                set end of outputLines to probeResult
-            end if
-        end try
-    end repeat
-    set AppleScript's text item delimiters to linefeed
-    set joinedOutput to outputLines as string
-    set AppleScript's text item delimiters to previousDelimiters
-    return joinedOutput
-end tell
-"""#
-        .replacingOccurrences(of: "PROBE_JS", with: escapedForAppleScript(probeJavaScript))
+            let title = normalizedText(parts[0])
+            let url = normalizedText(parts[1])
+            guard isSupportedMediaURL(url) else { continue }
+
+            return Candidate(url: url, title: title)
+        }
+        return nil
     }
 
     private func safariAudibleTabsScript() -> String {
@@ -648,9 +595,9 @@ end tell
 """#
     }
 
-    private func chromeAudibleTabsScript() -> String {
+    private func chromiumAudibleTabsScript(bundleID: String) -> String {
         #"""
-tell application id "com.google.Chrome"
+tell application id "\#(bundleID)"
     if (count of windows) is 0 then return ""
     set outputLines to {}
     set previousDelimiters to AppleScript's text item delimiters
@@ -675,25 +622,204 @@ end tell
 """#
     }
 
+    private func safariActiveTabsScript() -> String {
+        #"""
+tell application id "com.apple.Safari"
+    if (count of windows) is 0 then return ""
+    set outputLines to {}
+    set previousDelimiters to AppleScript's text item delimiters
+    repeat with w in windows
+        try
+            set tabRef to current tab of w
+            set tabTitle to (name of tabRef) as string
+            set tabURL to (URL of tabRef) as string
+            if tabURL is not "" then
+                set end of outputLines to (tabTitle & "|||" & tabURL)
+            end if
+        end try
+    end repeat
+    set AppleScript's text item delimiters to linefeed
+    set joinedOutput to outputLines as string
+    set AppleScript's text item delimiters to previousDelimiters
+    return joinedOutput
+end tell
+"""#
+    }
+
+    private func chromiumActiveTabsScript(bundleID: String) -> String {
+        #"""
+tell application id "\#(bundleID)"
+    if (count of windows) is 0 then return ""
+    set outputLines to {}
+    set previousDelimiters to AppleScript's text item delimiters
+    repeat with w in windows
+        try
+            set tabRef to active tab of w
+            set tabTitle to (title of tabRef) as string
+            set tabURL to (URL of tabRef) as string
+            if tabURL is not "" then
+                set end of outputLines to (tabTitle & "|||" & tabURL)
+            end if
+        end try
+    end repeat
+    set AppleScript's text item delimiters to linefeed
+    set joinedOutput to outputLines as string
+    set AppleScript's text item delimiters to previousDelimiters
+    return joinedOutput
+end tell
+"""#
+    }
+
+    private func enrichedMetadata(for mediaURL: String) -> EnrichedMetadata? {
+        let normalizedURL = normalizedText(mediaURL)
+        guard normalizedURL.isEmpty == false else { return nil }
+
+        if let cached = oEmbedCacheByURL[normalizedURL] {
+            return cached
+        }
+
+        if let cooldownUntil = oEmbedCooldownUntilByURL[normalizedURL], cooldownUntil > Date() {
+            return nil
+        }
+
+        guard let endpoint = oEmbedEndpoint(for: normalizedURL) else { return nil }
+        guard let response = fetchOEmbed(from: endpoint) else {
+            oEmbedCooldownUntilByURL[normalizedURL] = Date().addingTimeInterval(oEmbedFailureCooldown)
+            return nil
+        }
+
+        let title = normalizedText(response.title)
+        let artist = normalizedText(response.author_name)
+        let artworkCandidate = normalizedText(response.thumbnail_url)
+        let artworkURL = isSupportedMediaURL(artworkCandidate) ? artworkCandidate : nil
+
+        guard title.isEmpty == false || artist.isEmpty == false || artworkURL != nil else { return nil }
+
+        let metadata = EnrichedMetadata(
+            title: title,
+            artist: artist,
+            artworkURLString: artworkURL
+        )
+        oEmbedCacheByURL[normalizedURL] = metadata
+        return metadata
+    }
+
+    private func oEmbedEndpoint(for mediaURL: String) -> URL? {
+        guard let url = URL(string: mediaURL),
+              let host = url.host?.lowercased() else {
+            return nil
+        }
+
+        let endpointBase: String
+        if host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "youtu.be" {
+            endpointBase = "https://www.youtube.com/oembed"
+        } else if host == "twitch.tv" || host == "www.twitch.tv" {
+            endpointBase = "https://www.twitch.tv/oembed"
+        } else {
+            return nil
+        }
+
+        guard var components = URLComponents(string: endpointBase) else { return nil }
+        components.queryItems = [
+            URLQueryItem(name: "url", value: mediaURL),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        return components.url
+    }
+
+    private func fetchOEmbed(from endpoint: URL) -> OEmbedResponse? {
+        let semaphore = DispatchSemaphore(value: 0)
+        var parsedResponse: OEmbedResponse?
+
+        let task = URLSession.shared.dataTask(with: endpoint) { data, _, _ in
+            defer { semaphore.signal() }
+            guard let data else { return }
+            guard let decoded = try? JSONDecoder().decode(OEmbedResponse.self, from: data) else { return }
+            parsedResponse = decoded
+        }
+
+        task.resume()
+        let waitResult = semaphore.wait(timeout: .now() + 1.2)
+        if waitResult != .success {
+            task.cancel()
+            return nil
+        }
+
+        return parsedResponse
+    }
+
     private func isRunning(bundleID: String) -> Bool {
         NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty == false
     }
 
     private func runAppleScript(_ source: String, bundleID: String) -> String? {
         guard let script = NSAppleScript(source: source) else {
+            NSLog("Notch2.0 browser probe: AppleScript init failed for %@", bundleID)
             applyProbeCooldown(for: bundleID, errorDescription: "AppleScript init failed")
             return nil
         }
         var error: NSDictionary?
-        let result = script.executeAndReturnError(&error)
-        if let error {
-            applyProbeCooldown(for: bundleID, errorDescription: "\(error)")
+        var result = script.executeAndReturnError(&error)
+        var resolvedError = error
+
+        if let errorNumber = (resolvedError?["NSAppleScriptErrorNumber"] as? NSNumber)?.intValue,
+           errorNumber == -609 {
+            usleep(150_000)
+            var retryError: NSDictionary?
+            let retryResult = script.executeAndReturnError(&retryError)
+            if retryError == nil {
+                return retryResult.stringValue
+            }
+            resolvedError = retryError
+            result = retryResult
+        }
+
+        if let error = resolvedError {
+            let errorNumber = (error["NSAppleScriptErrorNumber"] as? NSNumber)?.intValue
+            if errorNumber == -1743 {
+                requestAutomationPromptIfNeeded(for: bundleID)
+            }
+            NSLog("Notch2.0 browser probe blocked for %@: %@", bundleID, "\(error)")
+            applyProbeCooldown(for: bundleID, errorDescription: "\(error)", errorNumber: errorNumber)
             return nil
         }
+
         return result.stringValue
     }
 
-    private func applyProbeCooldown(for bundleID: String, errorDescription: String) {
+    private func requestAutomationPromptIfNeeded(for bundleID: String) {
+        guard automationPromptAttemptedBundles.contains(bundleID) == false else { return }
+        automationPromptAttemptedBundles.insert(bundleID)
+
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+
+            let scriptSource = """
+            tell application id "\(bundleID)"
+                get name
+            end tell
+            """
+
+            guard let script = NSAppleScript(source: scriptSource) else { return }
+            var error: NSDictionary?
+            _ = script.executeAndReturnError(&error)
+            if let error {
+                NSLog("Notch2.0 automation prompt attempt for %@ failed: %@", bundleID, "\(error)")
+            }
+        }
+    }
+
+    private func applyProbeCooldown(for bundleID: String, errorDescription: String, errorNumber: Int? = nil) {
+        if errorNumber == -609 {
+            probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(connectionInvalidCooldown)
+            return
+        }
+
+        if errorNumber == -1743 {
+            probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(authorizationDeniedCooldown)
+            return
+        }
+
         let lower = errorDescription.lowercased()
         let delay = lower.contains("fsfindfolder failed with error=-43")
             ? fsFindFolderErrorCooldown
@@ -701,17 +827,14 @@ end tell
         probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(delay)
     }
 
-    private func escapedForAppleScript(_ source: String) -> String {
-        source
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: " ")
-    }
-
     private func isSupportedMediaURL(_ rawURL: String) -> Bool {
         guard let url = URL(string: rawURL) else { return false }
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
+    }
+
+    private func normalizedText(_ value: String?) -> String {
+        (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func cleanedTitle(_ title: String, url: String) -> String {
@@ -747,6 +870,41 @@ end tell
         default:
             return host
         }
+    }
+
+    private func isLikelyMediaPage(url rawURL: String, title: String) -> Bool {
+        guard let url = URL(string: rawURL),
+              let host = url.host?.lowercased() else {
+            return false
+        }
+
+        let path = url.path.lowercased()
+        let normalizedTitle = title.lowercased()
+
+        if host == "youtu.be" {
+            return true
+        }
+
+        if host == "youtube.com" || host == "www.youtube.com" || host == "m.youtube.com" || host == "music.youtube.com" {
+            if path == "/watch" || path.hasPrefix("/watch/") || path.hasPrefix("/shorts/") || path.hasPrefix("/live/") {
+                return true
+            }
+            return normalizedTitle.contains("youtube")
+        }
+
+        if host == "twitch.tv" || host == "www.twitch.tv" {
+            let blockedPrefixes = ["/directory", "/downloads", "/settings", "/p/", "/jobs", "/search"]
+            if blockedPrefixes.contains(where: { path.hasPrefix($0) }) {
+                return false
+            }
+            return path.count > 1
+        }
+
+        if host == "vimeo.com" || host == "www.vimeo.com" {
+            return path.count > 1
+        }
+
+        return false
     }
 }
 

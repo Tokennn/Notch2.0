@@ -17,9 +17,12 @@ final class HUDWindowController {
     private var shouldRunEntryBounce = false
     private var collapseTask: DispatchWorkItem?
     private var lastNowPlayingSignature: String?
-    private let autoCollapseDelay: TimeInterval = 10
+    private let autoCollapseDelay: TimeInterval = 3
 
     private let nowPlayingCanvasSize = NSSize(width: 376, height: 98)
+    private let nowPlayingInteractiveCardSize = NSSize(width: 324, height: 76)
+    private let collapsedHandleInteractiveSize = NSSize(width: 110, height: 18)
+    private var mouseInterceptionTimer: Timer?
 
     private let panel: HUDPanel = {
         let panel = HUDPanel(
@@ -69,13 +72,13 @@ final class HUDWindowController {
 
         panel.setContentSize(targetSize)
         panel.hasShadow = false
-        panel.ignoresMouseEvents = payload.layout == .compact
 
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let frame = frameOnTopCenter(on: screen, size: targetSize, layout: payload.layout)
         panel.setFrame(frame, display: true)
 
         updateRootView()
+        refreshMouseInterceptionPolicy()
         shouldRunEntryBounce = false
 
         if !isVisible {
@@ -98,6 +101,8 @@ final class HUDWindowController {
         guard isVisible else { return }
 
         cancelCollapseTask()
+        stopMouseInterceptionTimer()
+        panel.ignoresMouseEvents = true
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.2
@@ -194,6 +199,7 @@ final class HUDWindowController {
         shouldRunEntryBounce = true
         updateRootView()
         shouldRunEntryBounce = false
+        refreshMouseInterceptionPolicy()
         scheduleAutoCollapse()
     }
 
@@ -204,6 +210,7 @@ final class HUDWindowController {
         isNowPlayingCollapsed = true
         shouldRunEntryBounce = false
         updateRootView()
+        refreshMouseInterceptionPolicy()
         cancelCollapseTask()
     }
 
@@ -215,6 +222,7 @@ final class HUDWindowController {
             guard self.currentLayout == .nowPlaying else { return }
             self.isNowPlayingCollapsed = true
             self.updateRootView()
+            self.refreshMouseInterceptionPolicy()
         }
 
         collapseTask = task
@@ -231,6 +239,71 @@ final class HUDWindowController {
         shouldRunEntryBounce = false
         lastNowPlayingSignature = nil
         cancelCollapseTask()
+    }
+
+    private func refreshMouseInterceptionPolicy() {
+        guard currentLayout == .nowPlaying else {
+            stopMouseInterceptionTimer()
+            panel.ignoresMouseEvents = true
+            return
+        }
+
+        if isNowPlayingCollapsed, currentPayload?.canExpandFromCollapsed == false {
+            stopMouseInterceptionTimer()
+            panel.ignoresMouseEvents = true
+            return
+        }
+
+        startMouseInterceptionTimerIfNeeded()
+        updateMouseInterception()
+    }
+
+    private func startMouseInterceptionTimerIfNeeded() {
+        guard mouseInterceptionTimer == nil else { return }
+
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.updateMouseInterception()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        mouseInterceptionTimer = timer
+    }
+
+    private func stopMouseInterceptionTimer() {
+        mouseInterceptionTimer?.invalidate()
+        mouseInterceptionTimer = nil
+    }
+
+    private func updateMouseInterception() {
+        guard currentLayout == .nowPlaying else {
+            panel.ignoresMouseEvents = true
+            return
+        }
+
+        if isNowPlayingCollapsed, currentPayload?.canExpandFromCollapsed == false {
+            panel.ignoresMouseEvents = true
+            return
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        panel.ignoresMouseEvents = interactiveFrameForNowPlaying().contains(mouseLocation) == false
+    }
+
+    private func interactiveFrameForNowPlaying() -> NSRect {
+        if isNowPlayingCollapsed {
+            return NSRect(
+                x: panel.frame.midX - (collapsedHandleInteractiveSize.width / 2),
+                y: panel.frame.maxY - collapsedHandleInteractiveSize.height - 2,
+                width: collapsedHandleInteractiveSize.width,
+                height: collapsedHandleInteractiveSize.height
+            )
+        }
+
+        return NSRect(
+            x: panel.frame.midX - (nowPlayingInteractiveCardSize.width / 2),
+            y: panel.frame.maxY - nowPlayingInteractiveCardSize.height - 4,
+            width: nowPlayingInteractiveCardSize.width,
+            height: nowPlayingInteractiveCardSize.height
+        )
     }
 
     private func frameOnTopCenter(on screen: NSScreen, size: NSSize, layout: HUDLayout) -> NSRect {

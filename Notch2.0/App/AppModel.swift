@@ -37,6 +37,17 @@ final class AppModel: ObservableObject {
     private var latestSnapshot: NowPlayingSnapshot?
 
     init() {
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: [
+            "EnableWebPlayerDetection": true,
+            "EnableSystemNowPlayingCenter": true
+        ])
+        if defaults.object(forKey: "EnableWebPlayerDetection") == nil {
+            defaults.set(true, forKey: "EnableWebPlayerDetection")
+        }
+        if defaults.object(forKey: "EnableSystemNowPlayingCenter") == nil {
+            defaults.set(true, forKey: "EnableSystemNowPlayingCenter")
+        }
         refreshRuntime()
     }
 
@@ -192,6 +203,12 @@ final class AppModel: ObservableObject {
             return "Safari"
         case "com.google.Chrome":
             return "Chrome"
+        case "com.brave.Browser":
+            return "Brave"
+        case "com.microsoft.edgemac":
+            return "Edge"
+        case "company.thebrowser.Browser":
+            return "Arc"
         case "org.mozilla.firefox":
             return "Firefox"
         default:
