@@ -7,6 +7,7 @@ final class NowPlayingService {
     private let pollQueue = DispatchQueue(label: "notch2.now-playing.poll", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
     private let browserProbe = BrowserNowPlayingBrowserProbe()
+    private let desktopPlayerProbe = DesktopPlayerNowPlayingProbe()
     private var onUpdate: ((NowPlayingSnapshot?) -> Void)?
     private var lastSignature: String?
     private var spotifyObserver: NSObjectProtocol?
@@ -52,6 +53,19 @@ final class NowPlayingService {
         }
     }
 
+    func applyLocalSnapshotOverride(_ snapshot: NowPlayingSnapshot) {
+        pollQueue.async { [weak self] in
+            guard let self else { return }
+
+            if snapshot.sourceApp == "com.spotify.client" {
+                self.latestSpotifySnapshot = snapshot
+                self.latestSpotifySnapshotDate = Date()
+            }
+
+            self.dispatch(snapshot: snapshot)
+        }
+    }
+
     private func startTimer() {
         timer?.cancel()
 
@@ -71,9 +85,16 @@ final class NowPlayingService {
             return
         }
 
+        let desktopPlayerSnapshot = fetchFromDesktopPlayerProbe()
+        if let desktopPlayerSnapshot, desktopPlayerSnapshot.isPlaying {
+            dispatch(snapshot: desktopPlayerSnapshot)
+            return
+        }
+
         let snapshot = fetchFromBrowserProbeIfEnabled()
             ?? fetchFromMediaPlayerCenterIfEnabled()
             ?? fetchFromMediaRemoteIfEnabled()
+            ?? desktopPlayerSnapshot
         dispatch(snapshot: snapshot)
     }
 
@@ -85,6 +106,10 @@ final class NowPlayingService {
     private func fetchFromBrowserProbeIfEnabled() -> NowPlayingSnapshot? {
         guard webPlayerDetectionEnabled else { return nil }
         return browserProbe.fetchNowPlaying()
+    }
+
+    private func fetchFromDesktopPlayerProbe() -> NowPlayingSnapshot? {
+        desktopPlayerProbe.fetchNowPlaying()
     }
 
     private func fetchFromMediaRemoteIfEnabled() -> NowPlayingSnapshot? {
@@ -114,13 +139,19 @@ final class NowPlayingService {
     private func makeSignature(for snapshot: NowPlayingSnapshot?) -> String {
         guard let snapshot else { return "none" }
 
+        // Quantize timeline values so seek/progress jumps still trigger UI refresh,
+        // without creating noisy signature churn from tiny floating-point deltas.
+        let elapsedBucket = snapshot.elapsedTime.map { String(Int(($0 * 5).rounded())) } ?? ""
+        let durationBucket = snapshot.duration.map { String(Int(($0 * 5).rounded())) } ?? ""
+
         return [
             snapshot.title,
             snapshot.artist,
             snapshot.sourceApp ?? "",
             snapshot.trackIdentifier ?? "",
             snapshot.isPlaying ? "1" : "0",
-            snapshot.duration.map { String($0) } ?? ""
+            elapsedBucket,
+            durationBucket
         ].joined(separator: "|")
     }
 
@@ -435,6 +466,319 @@ final class NowPlayingService {
             || normalized.contains("nsfile")
     }
 
+}
+
+private final class DesktopPlayerNowPlayingProbe {
+    private let supportedPlayers = [
+        "org.videolan.vlc",
+        "com.apple.QuickTimePlayerX"
+    ]
+    private var probeCooldownUntilByBundle: [String: Date] = [:]
+    private var automationPromptAttemptedBundles: Set<String> = []
+    private let genericScriptErrorCooldown: TimeInterval = 15
+    private let connectionInvalidCooldown: TimeInterval = 2
+    private let authorizationDeniedCooldown: TimeInterval = 8
+
+    func fetchNowPlaying() -> NowPlayingSnapshot? {
+        var pausedSnapshot: NowPlayingSnapshot?
+
+        for bundleID in supportedPlayers {
+            guard isRunning(bundleID: bundleID) else { continue }
+            if let cooldownUntil = probeCooldownUntilByBundle[bundleID], cooldownUntil > Date() {
+                continue
+            }
+
+            let snapshot: NowPlayingSnapshot?
+            switch bundleID {
+            case "org.videolan.vlc":
+                snapshot = probeVLCNowPlaying()
+            case "com.apple.QuickTimePlayerX":
+                snapshot = probeQuickTimeNowPlaying()
+            default:
+                snapshot = nil
+            }
+
+            guard let snapshot else { continue }
+            if snapshot.isPlaying {
+                return snapshot
+            }
+            if pausedSnapshot == nil {
+                pausedSnapshot = snapshot
+            }
+        }
+
+        return pausedSnapshot
+    }
+
+    private func probeVLCNowPlaying() -> NowPlayingSnapshot? {
+        let bundleID = "org.videolan.vlc"
+        guard let raw = runAppleScript(vlcNowPlayingScript(), bundleID: bundleID), raw.isEmpty == false else { return nil }
+        let parts = raw.components(separatedBy: "|||")
+        guard parts.count >= 6 else { return nil }
+
+        var title = normalizedText(parts[0])
+        let artist = normalizedText(parts[1])
+        let state = normalizedText(parts[2]).lowercased()
+        let elapsedRaw = normalizedDouble(parts[3])
+        let durationRaw = normalizedDouble(parts[4])
+        let mediaPath = normalizedText(parts[5])
+
+        if title.isEmpty {
+            title = mediaTitle(from: mediaPath) ?? ""
+        }
+
+        if title.isEmpty && artist.isEmpty {
+            return nil
+        }
+
+        let duration = normalizeDuration(durationRaw)
+        let elapsed = normalizeElapsed(elapsedRaw, duration: duration)
+        let isPlaying = state.contains("play")
+        let trackIdentifier = mediaPath.isEmpty ? nil : mediaPath
+
+        return NowPlayingSnapshot(
+            title: title.isEmpty ? "Lecture en cours" : title,
+            artist: artist,
+            sourceApp: bundleID,
+            trackIdentifier: trackIdentifier,
+            artworkURLString: nil,
+            isPlaying: isPlaying,
+            elapsedTime: elapsed,
+            duration: duration,
+            artworkData: nil
+        )
+    }
+
+    private func probeQuickTimeNowPlaying() -> NowPlayingSnapshot? {
+        let bundleID = "com.apple.QuickTimePlayerX"
+        guard let raw = runAppleScript(quickTimeNowPlayingScript(), bundleID: bundleID), raw.isEmpty == false else { return nil }
+        let parts = raw.components(separatedBy: "|||")
+        guard parts.count >= 5 else { return nil }
+
+        var title = normalizedText(parts[0])
+        let rate = normalizedDouble(parts[1]) ?? 0
+        let elapsedRaw = normalizedDouble(parts[2])
+        let durationRaw = normalizedDouble(parts[3])
+        let mediaPath = normalizedText(parts[4])
+
+        if title.isEmpty {
+            title = mediaTitle(from: mediaPath) ?? ""
+        }
+        guard title.isEmpty == false else { return nil }
+
+        let duration = normalizeDuration(durationRaw)
+        let elapsed = normalizeElapsed(elapsedRaw, duration: duration)
+        let isPlaying = rate > 0.001
+        let trackIdentifier = mediaPath.isEmpty ? nil : mediaPath
+
+        return NowPlayingSnapshot(
+            title: title,
+            artist: "",
+            sourceApp: bundleID,
+            trackIdentifier: trackIdentifier,
+            artworkURLString: nil,
+            isPlaying: isPlaying,
+            elapsedTime: elapsed,
+            duration: duration,
+            artworkData: nil
+        )
+    }
+
+    private func normalizedText(_ value: String?) -> String {
+        (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedDouble(_ value: String?) -> Double? {
+        let normalized = normalizedText(value)
+        guard normalized.isEmpty == false else { return nil }
+        let decimalCandidate = normalized.replacingOccurrences(of: ",", with: ".")
+        return Double(decimalCandidate)
+    }
+
+    private func normalizeDuration(_ rawValue: Double?) -> TimeInterval? {
+        guard var value = sanitizedTime(rawValue) else { return nil }
+        if value > 100_000 {
+            value /= 1_000
+        }
+        return value
+    }
+
+    private func normalizeElapsed(_ rawValue: Double?, duration: TimeInterval?) -> TimeInterval? {
+        guard var value = sanitizedTime(rawValue) else { return nil }
+
+        if value > 100_000 {
+            value /= 1_000
+        }
+        if let duration, duration > 0, value > duration * 10 {
+            value /= 1_000
+        }
+        if let duration, duration > 0 {
+            value = min(value, duration)
+        }
+
+        return value
+    }
+
+    private func sanitizedTime(_ value: Double?) -> TimeInterval? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return value
+    }
+
+    private func mediaTitle(from mediaPath: String) -> String? {
+        guard mediaPath.isEmpty == false else { return nil }
+
+        if let url = URL(string: mediaPath), let scheme = url.scheme, scheme.isEmpty == false {
+            let candidate = url.deletingPathExtension().lastPathComponent
+            if candidate.isEmpty == false {
+                return candidate
+            }
+        }
+
+        let candidate = URL(fileURLWithPath: mediaPath).deletingPathExtension().lastPathComponent
+        return candidate.isEmpty ? nil : candidate
+    }
+
+    private func vlcNowPlayingScript() -> String {
+        #"""
+tell application id "org.videolan.vlc"
+    if not running then return ""
+    set isPlaying to false
+    try
+        set isPlaying to playing
+    end try
+    set stateName to "paused"
+    if isPlaying then set stateName to "playing"
+    set itemName to ""
+    set itemPath to ""
+    set itemDuration to ""
+    set itemPosition to ""
+    try
+        set itemName to (name of current item) as string
+    end try
+    try
+        set itemPath to (path of current item) as string
+    end try
+    try
+        set itemDuration to (duration of current item) as string
+    end try
+    try
+        set itemPosition to (current time) as string
+    end try
+    if itemName is "" and itemPath is "" then return ""
+    return itemName & "|||" & "" & "|||" & stateName & "|||" & itemPosition & "|||" & itemDuration & "|||" & itemPath
+end tell
+"""#
+    }
+
+    private func quickTimeNowPlayingScript() -> String {
+        #"""
+tell application id "com.apple.QuickTimePlayerX"
+    if not running then return ""
+    if not (exists document 1) then return ""
+    set docRef to document 1
+    set docName to ""
+    set docPath to ""
+    set docRate to ""
+    set docCurrentTime to ""
+    set docDuration to ""
+    try
+        set docName to (name of docRef) as string
+    end try
+    try
+        set docPath to (path of docRef) as string
+    end try
+    try
+        set docRate to (rate of docRef) as string
+    end try
+    try
+        set docCurrentTime to (current time of docRef) as string
+    end try
+    try
+        set docDuration to (duration of docRef) as string
+    end try
+    return docName & "|||" & docRate & "|||" & docCurrentTime & "|||" & docDuration & "|||" & docPath
+end tell
+"""#
+    }
+
+    private func isRunning(bundleID: String) -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty == false
+    }
+
+    private func runAppleScript(_ source: String, bundleID: String) -> String? {
+        guard let script = NSAppleScript(source: source) else {
+            applyProbeCooldown(for: bundleID, errorDescription: "AppleScript init failed")
+            return nil
+        }
+
+        var error: NSDictionary?
+        var result = script.executeAndReturnError(&error)
+        var resolvedError = error
+
+        if let errorNumber = (resolvedError?["NSAppleScriptErrorNumber"] as? NSNumber)?.intValue,
+           errorNumber == -609 {
+            usleep(150_000)
+            var retryError: NSDictionary?
+            let retryResult = script.executeAndReturnError(&retryError)
+            if retryError == nil {
+                return retryResult.stringValue
+            }
+            resolvedError = retryError
+            result = retryResult
+        }
+
+        if let error = resolvedError {
+            let errorNumber = (error["NSAppleScriptErrorNumber"] as? NSNumber)?.intValue
+            if errorNumber == -1743 {
+                requestAutomationPromptIfNeeded(for: bundleID)
+            }
+            NSLog("Notch2.0 desktop player probe blocked for %@: %@", bundleID, "\(error)")
+            applyProbeCooldown(for: bundleID, errorDescription: "\(error)", errorNumber: errorNumber)
+            return nil
+        }
+
+        return result.stringValue
+    }
+
+    private func requestAutomationPromptIfNeeded(for bundleID: String) {
+        guard automationPromptAttemptedBundles.contains(bundleID) == false else { return }
+        automationPromptAttemptedBundles.insert(bundleID)
+
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+
+            let scriptSource = """
+            tell application id "\(bundleID)"
+                get name
+            end tell
+            """
+
+            guard let script = NSAppleScript(source: scriptSource) else { return }
+            var error: NSDictionary?
+            _ = script.executeAndReturnError(&error)
+            if let error {
+                NSLog("Notch2.0 automation prompt attempt for %@ failed: %@", bundleID, "\(error)")
+            }
+        }
+    }
+
+    private func applyProbeCooldown(for bundleID: String, errorDescription: String, errorNumber: Int? = nil) {
+        if errorNumber == -609 {
+            probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(connectionInvalidCooldown)
+            return
+        }
+
+        if errorNumber == -1743 {
+            probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(authorizationDeniedCooldown)
+            return
+        }
+
+        let lower = errorDescription.lowercased()
+        let delay = lower.contains("fsfindfolder failed with error=-43")
+            ? 60 * 60 * 8
+            : genericScriptErrorCooldown
+        probeCooldownUntilByBundle[bundleID] = Date().addingTimeInterval(delay)
+    }
 }
 
 private final class BrowserNowPlayingBrowserProbe {

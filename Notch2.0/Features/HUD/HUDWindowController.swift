@@ -18,6 +18,7 @@ final class HUDWindowController {
     private var collapseTask: DispatchWorkItem?
     private var lastNowPlayingSignature: String?
     private let autoCollapseDelay: TimeInterval = 3
+    private let autoCollapseHoverRetryDelay: TimeInterval = 0.35
 
     private let nowPlayingCanvasSize = NSSize(width: 376, height: 98)
     private let nowPlayingInteractiveCardSize = NSSize(width: 324, height: 76)
@@ -215,18 +216,29 @@ final class HUDWindowController {
     }
 
     private func scheduleAutoCollapse() {
+        scheduleAutoCollapse(after: autoCollapseDelay)
+    }
+
+    private func scheduleAutoCollapse(after delay: TimeInterval) {
         cancelCollapseTask()
 
         let task = DispatchWorkItem { [weak self] in
             guard let self else { return }
             guard self.currentLayout == .nowPlaying else { return }
+            guard self.isNowPlayingCollapsed == false else { return }
+
+            if self.isMouseOverExpandedNowPlayingArea() {
+                self.scheduleAutoCollapse(after: self.autoCollapseHoverRetryDelay)
+                return
+            }
+
             self.isNowPlayingCollapsed = true
             self.updateRootView()
             self.refreshMouseInterceptionPolicy()
         }
 
         collapseTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + autoCollapseDelay, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
     private func cancelCollapseTask() {
@@ -304,6 +316,19 @@ final class HUDWindowController {
             width: nowPlayingInteractiveCardSize.width,
             height: nowPlayingInteractiveCardSize.height
         )
+    }
+
+    private func isMouseOverExpandedNowPlayingArea() -> Bool {
+        guard currentLayout == .nowPlaying else { return false }
+        guard isNowPlayingCollapsed == false else { return false }
+
+        let expandedFrame = NSRect(
+            x: panel.frame.midX - (nowPlayingInteractiveCardSize.width / 2),
+            y: panel.frame.maxY - nowPlayingInteractiveCardSize.height - 4,
+            width: nowPlayingInteractiveCardSize.width,
+            height: nowPlayingInteractiveCardSize.height
+        )
+        return expandedFrame.contains(NSEvent.mouseLocation)
     }
 
     private func frameOnTopCenter(on screen: NSScreen, size: NSSize, layout: HUDLayout) -> NSRect {

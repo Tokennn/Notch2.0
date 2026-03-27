@@ -33,6 +33,7 @@ struct HUDPayload: Identifiable {
     let onPrevious: (() -> Void)?
     let onPlayPause: (() -> Void)?
     let onNext: (() -> Void)?
+    let onSeek: ((Float) -> Void)?
 
     init(
         title: String,
@@ -45,7 +46,8 @@ struct HUDPayload: Identifiable {
         canExpandFromCollapsed: Bool = true,
         onPrevious: (() -> Void)? = nil,
         onPlayPause: (() -> Void)? = nil,
-        onNext: (() -> Void)? = nil
+        onNext: (() -> Void)? = nil,
+        onSeek: ((Float) -> Void)? = nil
     ) {
         self.title = title
         self.subtitle = subtitle
@@ -58,5 +60,6 @@ struct HUDPayload: Identifiable {
         self.onPrevious = onPrevious
         self.onPlayPause = onPlayPause
         self.onNext = onNext
+        self.onSeek = onSeek
     }
 }

@@ -34,6 +34,31 @@ final class PlaybackControlService {
         perform(.previous, preferredSourceBundleID: preferredSourceBundleID)
     }
 
+    @discardableResult
+    func seek(to progress: Float, preferredSourceBundleID: String?, duration: TimeInterval?) -> Bool {
+        guard let duration, duration > 0 else { return false }
+        let clampedProgress = min(max(progress, 0), 1)
+        let targetSeconds = TimeInterval(clampedProgress) * duration
+
+        if let preferredSourceBundleID, performDirectSeek(to: targetSeconds, bundleID: preferredSourceBundleID) {
+            return true
+        }
+
+        if preferredSourceBundleID == nil {
+            let spotifyRunning = isRunning(bundleID: "com.spotify.client")
+            let musicRunning = isRunning(bundleID: "com.apple.Music")
+
+            if spotifyRunning != musicRunning {
+                let fallbackBundleID = spotifyRunning ? "com.spotify.client" : "com.apple.Music"
+                if performDirectSeek(to: targetSeconds, bundleID: fallbackBundleID) {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
     private func perform(_ action: PlaybackAction, preferredSourceBundleID: String?) -> Bool {
         if let preferredSourceBundleID, performDirectAction(action, bundleID: preferredSourceBundleID) {
             return true
@@ -83,6 +108,71 @@ final class PlaybackControlService {
             case .previous:
                 return runAppleScript(#"tell application id "com.apple.Music" to previous track"#)
             }
+        case "org.videolan.vlc":
+            guard isRunning(bundleID: bundleID) else { return false }
+            switch action {
+            case .playPause:
+                return runAppleScript(#"tell application id "org.videolan.vlc" to if playing then pause else play"#)
+            case .next:
+                return runAppleScript(#"tell application id "org.videolan.vlc" to next"#)
+            case .previous:
+                return runAppleScript(#"tell application id "org.videolan.vlc" to previous"#)
+            }
+        case "com.apple.QuickTimePlayerX":
+            guard isRunning(bundleID: bundleID) else { return false }
+            switch action {
+            case .playPause:
+                return runAppleScript(
+                    #"""
+                    tell application id "com.apple.QuickTimePlayerX"
+                        if not (exists document 1) then return
+                        tell document 1
+                            if playing then
+                                pause
+                            else
+                                play
+                            end if
+                        end tell
+                    end tell
+                    """#
+                )
+            case .next, .previous:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+
+    private func performDirectSeek(to seconds: TimeInterval, bundleID: String) -> Bool {
+        guard seconds.isFinite else { return false }
+        let clampedSeconds = max(0, seconds)
+        let secondsLiteral = String(
+            format: "%.3f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            clampedSeconds
+        )
+
+        switch bundleID {
+        case "com.spotify.client":
+            guard isRunning(bundleID: bundleID) else { return false }
+            return runAppleScript(#"tell application id "com.spotify.client" to set player position to \#(secondsLiteral)"#)
+        case "com.apple.Music":
+            guard isRunning(bundleID: bundleID) else { return false }
+            return runAppleScript(#"tell application id "com.apple.Music" to set player position to \#(secondsLiteral)"#)
+        case "org.videolan.vlc":
+            guard isRunning(bundleID: bundleID) else { return false }
+            return runAppleScript(#"tell application id "org.videolan.vlc" to set current time to \#(secondsLiteral)"#)
+        case "com.apple.QuickTimePlayerX":
+            guard isRunning(bundleID: bundleID) else { return false }
+            return runAppleScript(
+                #"""
+                tell application id "com.apple.QuickTimePlayerX"
+                    if not (exists document 1) then return
+                    tell document 1 to set current time to \#(secondsLiteral)
+                end tell
+                """#
+            )
         default:
             return false
         }

@@ -140,6 +140,9 @@ final class AppModel: ObservableObject {
             },
             onNext: { [weak self] in
                 self?.goToNextTrack()
+            },
+            onSeek: { [weak self] progress in
+                self?.seekTo(progress: progress)
             }
         )
 
@@ -181,6 +184,38 @@ final class AppModel: ObservableObject {
         _ = playbackControlService.previousTrack(preferredSourceBundleID: current.sourceApp)
     }
 
+    private func seekTo(progress: Float) {
+        guard let current = latestSnapshot else { return }
+        guard let duration = current.duration, duration > 0 else { return }
+
+        let clampedProgress = min(max(progress, 0), 1)
+        let didSeek = playbackControlService.seek(
+            to: clampedProgress,
+            preferredSourceBundleID: current.sourceApp,
+            duration: duration
+        )
+        guard didSeek else { return }
+
+        let updatedElapsed = TimeInterval(clampedProgress) * duration
+        let updated = NowPlayingSnapshot(
+            title: current.title,
+            artist: current.artist,
+            sourceApp: current.sourceApp,
+            trackIdentifier: current.trackIdentifier,
+            artworkURLString: current.artworkURLString,
+            isPlaying: current.isPlaying,
+            elapsedTime: updatedElapsed,
+            duration: current.duration,
+            artworkData: current.artworkData
+        )
+
+        latestSnapshot = updated
+        nowPlayingService.applyLocalSnapshotOverride(updated)
+        let trackKey = makeTrackKey(for: updated)
+        let resolvedArtworkData = updated.artworkData ?? artworkByTrackKey[trackKey]
+        presentNowPlaying(snapshot: updated, overrideArtworkData: resolvedArtworkData)
+    }
+
     private func makeTrackKey(for snapshot: NowPlayingSnapshot) -> String {
         if let trackIdentifier = snapshot.trackIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
            trackIdentifier.isEmpty == false {
@@ -199,6 +234,10 @@ final class AppModel: ObservableObject {
         switch bundleID {
         case "com.spotify.client":
             return "Spotify"
+        case "org.videolan.vlc":
+            return "VLC"
+        case "com.apple.QuickTimePlayerX":
+            return "QuickTime Player"
         case "com.apple.Safari":
             return "Safari"
         case "com.google.Chrome":

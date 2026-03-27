@@ -15,6 +15,9 @@ struct HUDView: View {
     @State private var entryOffsetY: CGFloat = 0
     @State private var tapScale: CGFloat = 1
     @State private var tapOffsetY: CGFloat = 0
+    @State private var timelineDragProgress: CGFloat?
+    @State private var isTimelineHovered = false
+    @State private var isTimelineDragging = false
 
     private let nowPlayingCardSize = CGSize(width: 300, height: 62)
     private let nowPlayingCanvasSize = CGSize(width: 376, height: 98)
@@ -158,6 +161,8 @@ struct HUDView: View {
                     .font(.system(size: 10.8, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .allowsTightening(true)
 
                 if let subtitle = payload.subtitle, subtitle.isEmpty == false {
                     Text(subtitle)
@@ -175,20 +180,9 @@ struct HUDView: View {
                 )
                 .padding(.top, 1)
 
-                GeometryReader { proxy in
-                    let progress = CGFloat(min(max(payload.progress ?? 0, 0), 1))
-                    let width = max(6, proxy.size.width * progress)
-
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(.white.opacity(0.24))
-                        Capsule()
-                            .fill(.white.opacity(0.96))
-                            .frame(width: width)
-                    }
-                }
-                .frame(height: 4)
+                timelineView
             }
+            .layoutPriority(1)
 
             Spacer(minLength: 2)
 
@@ -242,6 +236,75 @@ struct HUDView: View {
                 onNowPlayingDoubleClick?()
             }
         )
+    }
+
+    private var timelineView: some View {
+        GeometryReader { proxy in
+            let progress = effectiveTimelineProgress
+            let width = max(6, proxy.size.width * progress)
+            let isTimelineInteractive = isTimelineHovered || isTimelineDragging
+            let trackCornerRadius: CGFloat = isTimelineInteractive ? 2.6 : 2.0
+
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: trackCornerRadius, style: .continuous)
+                    .fill(Color(white: 0.36).opacity(0.78))
+                RoundedRectangle(cornerRadius: trackCornerRadius, style: .continuous)
+                    .fill(Color(white: 0.82))
+                    .frame(width: width)
+                Circle()
+                    .fill(Color(white: 0.92))
+                    .frame(width: isTimelineInteractive ? 8 : 0, height: isTimelineInteractive ? 8 : 0)
+                    .offset(x: max(0, width - (isTimelineInteractive ? 4 : 0)))
+                    .opacity(isTimelineInteractive ? 1 : 0)
+            }
+            .frame(height: isTimelineInteractive ? 6 : 4)
+            .shadow(color: .black.opacity(isTimelineInteractive ? 0.26 : 0), radius: isTimelineInteractive ? 4 : 0)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle())
+            .animation(.spring(response: 0.22, dampingFraction: 0.80), value: isTimelineInteractive)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard payload.onSeek != nil else { return }
+                        isTimelineDragging = true
+                        isTimelineHovered = true
+                        let progress = normalizedTimelineProgress(
+                            x: value.location.x,
+                            width: proxy.size.width
+                        )
+                        timelineDragProgress = progress
+                    }
+                    .onEnded { value in
+                        defer {
+                            timelineDragProgress = nil
+                            isTimelineDragging = false
+                        }
+                        guard let onSeek = payload.onSeek else { return }
+                        let progress = normalizedTimelineProgress(
+                            x: value.location.x,
+                            width: proxy.size.width
+                        )
+                        onSeek(Float(progress))
+                    }
+            )
+            .onHover { hovering in
+                isTimelineHovered = hovering
+            }
+        }
+        .frame(height: 12)
+    }
+
+    private var effectiveTimelineProgress: CGFloat {
+        if let timelineDragProgress {
+            return min(max(timelineDragProgress, 0), 1)
+        }
+
+        return CGFloat(min(max(payload.progress ?? 0, 0), 1))
+    }
+
+    private func normalizedTimelineProgress(x: CGFloat, width: CGFloat) -> CGFloat {
+        let safeWidth = max(width, 1)
+        return min(max(x / safeWidth, 0), 1)
     }
 
     private var artworkView: some View {
