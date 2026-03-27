@@ -19,8 +19,8 @@ struct HUDView: View {
     private let nowPlayingCardSize = CGSize(width: 300, height: 62)
     private let nowPlayingCanvasSize = CGSize(width: 376, height: 98)
     private let collapsedHandleSize = CGSize(width: 86, height: 8)
-    private let notchTopCornerRadius: CGFloat = 19
-    private let notchTopCornerConcavity: CGFloat = 24
+    private let notchTopCornerRadius: CGFloat = 14
+    private let notchTopCornerConcavity: CGFloat = 52
     private let notchBottomCornerRadius: CGFloat = 22
 
     var body: some View {
@@ -225,10 +225,10 @@ struct HUDView: View {
         .padding(.vertical, 7)
         .frame(width: nowPlayingCardSize.width, height: nowPlayingCardSize.height)
         .background(
-            NotchCardShape(topInsetRadius: 20, bottomCornerRadius: 16, topCornerConcavity: 26)
+            NotchCardShape(topInsetRadius: 14, bottomCornerRadius: 16, topCornerConcavity: 52)
                 .fill(.black)
                 .overlay(
-                    NotchCardShape(topInsetRadius: 20, bottomCornerRadius: 16, topCornerConcavity: 26)
+                    NotchCardShape(topInsetRadius: 14, bottomCornerRadius: 16, topCornerConcavity: 52)
                         .stroke(.white.opacity(0.11), lineWidth: 1)
                 )
         )
@@ -425,8 +425,8 @@ private struct NotchCardShape: Shape {
     func path(in rect: CGRect) -> Path {
         let top = max(0, min(topInsetRadius, min(rect.width, rect.height) * 0.45))
         let bottom = max(0, min(bottomCornerRadius, min(rect.width, rect.height) * 0.45))
-        let concavity = max(0, min(topCornerConcavity, top * 2.0))
-        let bend = top * 0.92
+        let concavity = max(0, min(topCornerConcavity, top * 3.0))
+        let bend = top * 1.28
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX + top, y: rect.minY))
@@ -435,7 +435,7 @@ private struct NotchCardShape: Shape {
         path.addLine(to: CGPoint(x: rect.maxX - top, y: rect.minY))
         path.addCurve(
             to: CGPoint(x: rect.maxX, y: rect.minY + top),
-            control1: CGPoint(x: rect.maxX - top + bend + (concavity * 0.94), y: rect.minY),
+            control1: CGPoint(x: rect.maxX - top + bend + (concavity * 1.55), y: rect.minY),
             control2: CGPoint(x: rect.maxX, y: rect.minY + top - bend)
         )
 
@@ -458,7 +458,7 @@ private struct NotchCardShape: Shape {
         path.addCurve(
             to: CGPoint(x: rect.minX + top, y: rect.minY),
             control1: CGPoint(x: rect.minX, y: rect.minY + top - bend),
-            control2: CGPoint(x: rect.minX + top - bend - (concavity * 0.94), y: rect.minY)
+            control2: CGPoint(x: rect.minX + top - bend - (concavity * 1.55), y: rect.minY)
         )
 
         path.closeSubpath()
