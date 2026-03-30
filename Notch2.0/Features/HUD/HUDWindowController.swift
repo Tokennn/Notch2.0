@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import QuartzCore
 
 private final class HUDPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -18,6 +19,7 @@ final class HUDWindowController {
     private var collapseTask: DispatchWorkItem?
     private var lastNowPlayingSignature: String?
     private let autoCollapseDelay: TimeInterval = 3
+    private let startupAutoCollapseDelay: TimeInterval = 6
     private let autoCollapseHoverRetryDelay: TimeInterval = 0.35
 
     private let nowPlayingCanvasSize = NSSize(width: 376, height: 98)
@@ -76,7 +78,12 @@ final class HUDWindowController {
 
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let frame = frameOnTopCenter(on: screen, size: targetSize, layout: payload.layout)
-        panel.setFrame(frame, display: true)
+        if isVisible {
+            panel.setFrame(frame, display: true)
+        } else {
+            panel.setFrame(frame.offsetBy(dx: 0, dy: 18), display: true)
+            panel.alphaValue = 0
+        }
 
         updateRootView()
         refreshMouseInterceptionPolicy()
@@ -88,7 +95,7 @@ final class HUDWindowController {
             } else {
                 panel.orderFrontRegardless()
             }
-            panel.animator().alphaValue = 1
+            animatePanelEntry(to: frame)
             isVisible = true
         } else {
             if payload.layout == .nowPlaying, panel.isKeyWindow == false {
@@ -125,7 +132,7 @@ final class HUDWindowController {
     ) {
         if startCollapsed {
             isNowPlayingCollapsed = true
-            shouldRunEntryBounce = false
+            shouldRunEntryBounce = (isVisible == false) || (previousLayout != .nowPlaying)
             cancelCollapseTask()
             lastNowPlayingSignature = nowPlayingSignature(for: payload)
             return
@@ -133,13 +140,18 @@ final class HUDWindowController {
 
         let signature = nowPlayingSignature(for: payload)
         let isFirstNowPlaying = previousLayout != .nowPlaying
+        let isStartupReveal = previousLayout == nil && isVisible == false
         let didTrackChange = signature != lastNowPlayingSignature
         let becamePlaying = (previousPayload?.isPlaying ?? false) == false && (payload.isPlaying ?? false)
 
         if isFirstNowPlaying || didTrackChange || becamePlaying {
             isNowPlayingCollapsed = false
             shouldRunEntryBounce = true
-            scheduleAutoCollapse()
+            if isStartupReveal, payload.isPlaying == true {
+                scheduleAutoCollapse(after: startupAutoCollapseDelay)
+            } else {
+                scheduleAutoCollapse()
+            }
         }
 
         lastNowPlayingSignature = signature
@@ -151,6 +163,31 @@ final class HUDWindowController {
             payload.subtitle ?? "",
             payload.isPlaying == true ? "1" : "0"
         ].joined(separator: "|")
+    }
+
+    private func animatePanelEntry(to finalFrame: NSRect) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().setFrame(finalFrame.offsetBy(dx: 0, dy: -4), display: true)
+            panel.animator().alphaValue = 1
+        } completionHandler: { [weak self] in
+            guard let self else { return }
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.14
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                self.panel.animator().setFrame(finalFrame.offsetBy(dx: 0, dy: 1), display: true)
+            } completionHandler: { [weak self] in
+                guard let self else { return }
+
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.12
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    self.panel.animator().setFrame(finalFrame, display: true)
+                }
+            }
+        }
     }
 
     private func updateRootView() {

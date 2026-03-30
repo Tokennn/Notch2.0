@@ -14,6 +14,9 @@ final class NowPlayingService {
     private var musicObserver: NSObjectProtocol?
     private var latestSpotifySnapshot: NowPlayingSnapshot?
     private var latestSpotifySnapshotDate: Date?
+    private var lastSpotifyStartupProbeAt: Date?
+    private let spotifyStartupProbeInterval: TimeInterval = 1.4
+    private var spotifyStartupProbeRetryAfter: Date?
     private var webPlayerDetectionEnabled: Bool {
         let defaults = UserDefaults.standard
         if let storedValue = defaults.object(forKey: "EnableWebPlayerDetection") as? Bool {
@@ -50,6 +53,8 @@ final class NowPlayingService {
             self?.lastSignature = nil
             self?.latestSpotifySnapshot = nil
             self?.latestSpotifySnapshotDate = nil
+            self?.lastSpotifyStartupProbeAt = nil
+            self?.spotifyStartupProbeRetryAfter = nil
         }
     }
 
@@ -82,6 +87,13 @@ final class NowPlayingService {
     private func pollNowPlaying() {
         if let spotifySnapshot = liveSpotifySnapshotIfAvailable() {
             dispatch(snapshot: spotifySnapshot)
+            return
+        }
+
+        if let startupSpotifySnapshot = fetchSpotifyStartupSnapshotIfNeeded() {
+            latestSpotifySnapshot = startupSpotifySnapshot
+            latestSpotifySnapshotDate = Date()
+            dispatch(snapshot: startupSpotifySnapshot)
             return
         }
 
@@ -305,6 +317,105 @@ final class NowPlayingService {
             duration: duration ?? snapshot.duration,
             artworkData: artworkData
         )
+    }
+
+    private func fetchSpotifyStartupSnapshotIfNeeded() -> NowPlayingSnapshot? {
+        guard latestSpotifySnapshot == nil else { return nil }
+        guard isApplicationRunning(bundleID: "com.spotify.client") else {
+            lastSpotifyStartupProbeAt = nil
+            spotifyStartupProbeRetryAfter = nil
+            return nil
+        }
+
+        let now = Date()
+        if let retryAfter = spotifyStartupProbeRetryAfter, now < retryAfter {
+            return nil
+        }
+
+        if let lastProbeAt = lastSpotifyStartupProbeAt,
+           now.timeIntervalSince(lastProbeAt) < spotifyStartupProbeInterval {
+            return nil
+        }
+        lastSpotifyStartupProbeAt = now
+
+        guard let raw = spotifyStartupScriptResponse(), raw.isEmpty == false else { return nil }
+        let parts = raw.components(separatedBy: "|||")
+        guard parts.count >= 7 else { return nil }
+
+        let trackID = normalizedText(parts[0])
+        let title = normalizedText(parts[1])
+        let artist = normalizedText(parts[2])
+        let state = normalizedText(parts[3]).lowercased()
+        var elapsed = normalizedDouble(parts[4])
+        var duration = normalizedDouble(parts[5])
+        let artworkURL = normalizedText(parts[6])
+
+        guard title.isEmpty == false || artist.isEmpty == false else { return nil }
+
+        if let parsedDuration = duration, parsedDuration > 1_000 {
+            duration = parsedDuration / 1_000
+        }
+        if let parsedElapsed = elapsed, parsedElapsed > 1_000, (duration ?? 0) < 1_000 {
+            elapsed = parsedElapsed / 1_000
+        }
+        if let elapsedValue = elapsed, let durationValue = duration, durationValue > 0, elapsedValue > durationValue {
+            elapsed = durationValue
+        }
+
+        let isPlaying = state.contains("play")
+
+        return NowPlayingSnapshot(
+            title: title.isEmpty ? "Lecture en cours" : title,
+            artist: artist,
+            sourceApp: "com.spotify.client",
+            trackIdentifier: trackID.isEmpty ? nil : trackID,
+            artworkURLString: artworkURL.isEmpty ? nil : artworkURL,
+            isPlaying: isPlaying,
+            elapsedTime: elapsed,
+            duration: duration,
+            artworkData: nil
+        )
+    }
+
+    private func spotifyStartupScriptResponse() -> String? {
+        let scriptSource = #"""
+tell application id "com.spotify.client"
+    if not running then return ""
+    if player state is stopped then return ""
+    set trackID to id of current track
+    set trackName to name of current track
+    set trackArtist to artist of current track
+    set trackState to (player state as string)
+    set trackPosition to (player position) as string
+    set trackDuration to (duration of current track) as string
+    set trackArtworkURL to artwork url of current track
+    return trackID & "|||" & trackName & "|||" & trackArtist & "|||" & trackState & "|||" & trackPosition & "|||" & trackDuration & "|||" & trackArtworkURL
+end tell
+"""#
+
+        guard let script = NSAppleScript(source: scriptSource) else { return nil }
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        if let error {
+            let errorNumber = (error["NSAppleScriptErrorNumber"] as? NSNumber)?.intValue
+            let retryDelay: TimeInterval = (errorNumber == -1743) ? 20 : 5
+            spotifyStartupProbeRetryAfter = Date().addingTimeInterval(retryDelay)
+            NSLog("Notch2.0 spotify startup probe failed: %@", "\(error)")
+            return nil
+        }
+
+        spotifyStartupProbeRetryAfter = nil
+        return result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedText(_ value: String?) -> String {
+        (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedDouble(_ value: String?) -> Double? {
+        let normalized = normalizedText(value).replacingOccurrences(of: ",", with: ".")
+        guard normalized.isEmpty == false else { return nil }
+        return Double(normalized)
     }
 
     private func snapshotFromSpotifyNotification(_ notification: Notification) -> NowPlayingSnapshot? {

@@ -11,8 +11,12 @@ struct HUDView: View {
     @ObservedObject private var audioSpectrum = AudioSpectrumService.shared
 
     @State private var collapseProgress: CGFloat = 0
-    @State private var entryScale: CGFloat = 1
+    @State private var entryScaleX: CGFloat = 1
+    @State private var entryScaleY: CGFloat = 1
     @State private var entryOffsetY: CGFloat = 0
+    @State private var collapsedEntryScaleX: CGFloat = 1
+    @State private var collapsedEntryScaleY: CGFloat = 1
+    @State private var collapsedEntryOffsetY: CGFloat = 0
     @State private var tapScale: CGFloat = 1
     @State private var tapOffsetY: CGFloat = 0
     @State private var timelineDragProgress: CGFloat?
@@ -97,8 +101,8 @@ struct HUDView: View {
         ZStack(alignment: .top) {
             nowPlayingCard
                 .scaleEffect(
-                    x: max(0.72, (1 - (collapseProgress * 0.28)) * entryScale * tapScale),
-                    y: max(0.12, (1 - (collapseProgress * 0.86)) * entryScale * tapScale),
+                    x: max(0.72, (1 - (collapseProgress * 0.28)) * entryScaleX * tapScale),
+                    y: max(0.12, (1 - (collapseProgress * 0.86)) * entryScaleY * tapScale),
                     anchor: .top
                 )
                 .offset(y: entryOffsetY + tapOffsetY - (collapseProgress * 18))
@@ -108,11 +112,11 @@ struct HUDView: View {
             collapsedHandle
                 .opacity(Double(collapseProgress))
                 .scaleEffect(
-                    x: 0.9 + (collapseProgress * 0.1),
-                    y: 0.62 + (collapseProgress * 0.38),
+                    x: (0.9 + (collapseProgress * 0.1)) * collapsedEntryScaleX,
+                    y: (0.62 + (collapseProgress * 0.38)) * collapsedEntryScaleY,
                     anchor: .top
                 )
-                .offset(y: (1 - collapseProgress) * -8)
+                .offset(y: ((1 - collapseProgress) * -8) + collapsedEntryOffsetY)
                 .allowsHitTesting(collapseProgress > 0.92)
                 .onHover { hovering in
                     guard hovering else { return }
@@ -123,9 +127,20 @@ struct HUDView: View {
         .background(Color.clear)
         .onAppear {
             collapseProgress = isNowPlayingCollapsed ? 1 : 0
-            entryScale = 1
+            entryScaleX = 1
+            entryScaleY = 1
             entryOffsetY = 0
-            if isNowPlayingCollapsed == false, shouldRunEntryBounce {
+            collapsedEntryScaleX = 1
+            collapsedEntryScaleY = 1
+            collapsedEntryOffsetY = 0
+
+            if shouldRunEntryBounce == false {
+                return
+            }
+
+            if isNowPlayingCollapsed {
+                runCollapsedEntryBounce()
+            } else {
                 runEntryBounce()
             }
         }
@@ -136,8 +151,11 @@ struct HUDView: View {
         }
         .onChange(of: shouldRunEntryBounce) { _, value in
             guard value else { return }
-            guard isNowPlayingCollapsed == false else { return }
-            runEntryBounce()
+            if isNowPlayingCollapsed {
+                runCollapsedEntryBounce()
+            } else {
+                runEntryBounce()
+            }
         }
     }
 
@@ -334,18 +352,57 @@ struct HUDView: View {
     }
 
     private func runEntryBounce() {
-        entryScale = 0.96
-        entryOffsetY = -4
+        entryScaleX = 0.90
+        entryScaleY = 1.16
+        entryOffsetY = -14
 
-        withAnimation(.spring(response: 0.24, dampingFraction: 0.58)) {
-            entryScale = 1.02
-            entryOffsetY = 2
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.54, blendDuration: 0.12)) {
+            entryScaleX = 1.05
+            entryScaleY = 0.94
+            entryOffsetY = 6
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            withAnimation(.spring(response: 0.26, dampingFraction: 0.82)) {
-                entryScale = 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.68, blendDuration: 0.08)) {
+                entryScaleX = 0.985
+                entryScaleY = 1.03
+                entryOffsetY = -1
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            withAnimation(.spring(response: 0.30, dampingFraction: 0.88, blendDuration: 0.06)) {
+                entryScaleX = 1
+                entryScaleY = 1
                 entryOffsetY = 0
+            }
+        }
+    }
+
+    private func runCollapsedEntryBounce() {
+        collapsedEntryScaleX = 0.86
+        collapsedEntryScaleY = 1.20
+        collapsedEntryOffsetY = -11
+
+        withAnimation(.spring(response: 0.30, dampingFraction: 0.56, blendDuration: 0.12)) {
+            collapsedEntryScaleX = 1.04
+            collapsedEntryScaleY = 0.95
+            collapsedEntryOffsetY = 2
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.67, blendDuration: 0.08)) {
+                collapsedEntryScaleX = 0.99
+                collapsedEntryScaleY = 1.02
+                collapsedEntryOffsetY = -1
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86, blendDuration: 0.06)) {
+                collapsedEntryScaleX = 1
+                collapsedEntryScaleY = 1
+                collapsedEntryOffsetY = 0
             }
         }
     }
@@ -493,8 +550,6 @@ private struct NotchCardShape: Shape {
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX + top, y: rect.minY))
-
-        // Top edge + smooth outward top-right concavity (no visible hard angle)
         path.addLine(to: CGPoint(x: rect.maxX - top, y: rect.minY))
         path.addCurve(
             to: CGPoint(x: rect.maxX, y: rect.minY + top),
@@ -502,21 +557,17 @@ private struct NotchCardShape: Shape {
             control2: CGPoint(x: rect.maxX, y: rect.minY + top - bend)
         )
 
-        // Right edge + rounded bottom-right
         path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - bottom))
         path.addQuadCurve(
             to: CGPoint(x: rect.maxX - bottom, y: rect.maxY),
             control: CGPoint(x: rect.maxX, y: rect.maxY)
         )
 
-        // Bottom edge + rounded bottom-left
         path.addLine(to: CGPoint(x: rect.minX + bottom, y: rect.maxY))
         path.addQuadCurve(
             to: CGPoint(x: rect.minX, y: rect.maxY - bottom),
             control: CGPoint(x: rect.minX, y: rect.maxY)
         )
-
-        // Left edge + smooth outward top-left concavity (no visible hard angle)
         path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + top))
         path.addCurve(
             to: CGPoint(x: rect.minX + top, y: rect.minY),

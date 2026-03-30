@@ -35,6 +35,9 @@ final class AppModel: ObservableObject {
     private var artworkRequestsInFlight: Set<String> = []
     private var artworkByTrackKey: [String: Data] = [:]
     private var latestSnapshot: NowPlayingSnapshot?
+    private var startupIdleFallbackTask: DispatchWorkItem?
+    private var shouldDeferIdleNotchPresentation = false
+    private let startupIdleFallbackDelay: TimeInterval = 0.55
 
     init() {
         let defaults = UserDefaults.standard
@@ -59,7 +62,7 @@ final class AppModel: ObservableObject {
                     self?.handle(nowPlaying: snapshot)
                 }
             }
-            presentIdleCollapsedNotchIfNeeded()
+            beginStartupIdleNotchDeferral()
         } else {
             nowPlayingService.stop()
             hudCoordinator.dismissSticky()
@@ -67,6 +70,7 @@ final class AppModel: ObservableObject {
             latestSnapshot = nil
             artworkRequestsInFlight.removeAll()
             artworkByTrackKey.removeAll()
+            cancelStartupIdleNotchDeferral()
         }
     }
 
@@ -76,6 +80,7 @@ final class AppModel: ObservableObject {
         guard let snapshot else {
             latestSnapshot = nil
             activeTrackKey = nil
+            guard shouldDeferIdleNotchPresentation == false else { return }
             presentIdleCollapsedNotchIfNeeded()
             return
         }
@@ -83,6 +88,8 @@ final class AppModel: ObservableObject {
         if looksLikeSystemErrorMessage(snapshot.title) || looksLikeSystemErrorMessage(snapshot.artist) {
             return
         }
+
+        cancelStartupIdleNotchDeferral()
 
         latestSnapshot = snapshot
 
@@ -289,5 +296,26 @@ final class AppModel: ObservableObject {
             autoHideAfter: nil,
             startCollapsed: true
         )
+    }
+
+    private func beginStartupIdleNotchDeferral() {
+        cancelStartupIdleNotchDeferral()
+        shouldDeferIdleNotchPresentation = true
+
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.shouldDeferIdleNotchPresentation = false
+            guard self.latestSnapshot == nil else { return }
+            self.presentIdleCollapsedNotchIfNeeded()
+        }
+
+        startupIdleFallbackTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + startupIdleFallbackDelay, execute: task)
+    }
+
+    private func cancelStartupIdleNotchDeferral() {
+        startupIdleFallbackTask?.cancel()
+        startupIdleFallbackTask = nil
+        shouldDeferIdleNotchPresentation = false
     }
 }
