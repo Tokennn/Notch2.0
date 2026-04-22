@@ -22,6 +22,8 @@ struct HUDView: View {
     @State private var timelineDragProgress: CGFloat?
     @State private var isTimelineHovered = false
     @State private var isTimelineDragging = false
+    @State private var artworkSpinAngle: Double = 0
+    @State private var isArtworkSpinning = false
 
     private let nowPlayingCardSize = CGSize(width: 300, height: 62)
     private let nowPlayingCanvasSize = CGSize(width: 376, height: 98)
@@ -133,6 +135,8 @@ struct HUDView: View {
             collapsedEntryScaleX = 1
             collapsedEntryScaleY = 1
             collapsedEntryOffsetY = 0
+            artworkSpinAngle = 0
+            isArtworkSpinning = false
 
             if shouldRunEntryBounce == false {
                 return
@@ -349,6 +353,24 @@ struct HUDView: View {
         }
         .frame(width: 42, height: 42)
         .clipShape(RoundedRectangle(cornerRadius: 9))
+        .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .rotation3DEffect(
+            .degrees(artworkSpinAngle),
+            axis: (x: 0.18, y: 1, z: 0),
+            anchor: .center,
+            perspective: 0.75
+        )
+        .scaleEffect(isArtworkSpinning ? 1.06 : 1)
+        .shadow(
+            color: .black.opacity(isArtworkSpinning ? 0.36 : 0.20),
+            radius: isArtworkSpinning ? 10 : 4,
+            x: 0,
+            y: isArtworkSpinning ? 6 : 2
+        )
+        .animation(.spring(response: 0.32, dampingFraction: 0.78), value: isArtworkSpinning)
+        .onTapGesture {
+            runArtworkSpin()
+        }
     }
 
     private func runEntryBounce() {
@@ -425,6 +447,22 @@ struct HUDView: View {
                 tapScale = 1
                 tapOffsetY = 0
             }
+        }
+    }
+
+    private func runArtworkSpin() {
+        guard isArtworkSpinning == false else { return }
+        isArtworkSpinning = true
+        artworkSpinAngle = 0
+
+        let spinDuration = 0.68
+        withAnimation(.timingCurve(0.22, 0.82, 0.22, 1, duration: spinDuration)) {
+            artworkSpinAngle = 360
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + spinDuration) {
+            artworkSpinAngle = 0
+            isArtworkSpinning = false
         }
     }
 }
